@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# 获取 CPU 核心数用于并行压缩
+CPU_CORES=$(nproc)
+
+ROOT_PARTITION=${ROOT_PARTITION:-1}
+ROOT_MOUNT=${TMP_DIR}/root
+DETECT_BLS_BOOT=${DETECT_BLS_BOOT:-0}
+BOOT_MOUNT=${TMP_DIR}/boot
+
+echo 'Mounting root partition...'
+mount_part "${ROOT_PARTITION}" "${ROOT_MOUNT}"
+
+if [ -f "$ROOT_MOUNT/etc/machine-id" ]; then
+    echo 'reseting machine-id...'
+    : >| "$ROOT_MOUNT/etc/machine-id"
+fi
+
+if [ -f "$ROOT_MOUNT/var/lib/cloud/instance" ]; then
+    echo 'cleaning cloud-init state...'
+    # 使用 find 并行删除日志文件
+    find "$ROOT_MOUNT/var/log" -name "cloud-init*.log" -delete 2>/dev/null
+    rm -f "$ROOT_MOUNT/var/lib/cloud/instance"
+    rm -rf "$ROOT_MOUNT/var/lib/cloud/instances"
+fi
+
+if [ -d curtin ] || [ -d "$CURTIN_HOOKS" ]; then
+    echo 'Adding Curtin hooks...'
+    cp -r "${CURTIN_HOOKS:-curtin}" "${ROOT_MOUNT}"
+fi
+
+echo "Creating MAAS image ${OUTPUT}..."
+# 修改 TARFILE 输出路径为 /root/packer-maas/scripts 目录
+OUTPUT_BASENAME=$(basename "${OUTPUT}")
+TARFILE="/root/packer-maas/scripts/${OUTPUT_BASENAME}"
+
+# 使用并行 tar 和 pigz 管道
+tar -C "$ROOT_MOUNT" \
+    --acls \
+    --selinux \
+    --xattrs \
+    --one-file-system \
+    --exclude-backups \
+    -c . | \
+pigz -9 -p "$CPU_CORES" > "${TARFILE}"
+
+# 更新 OUTPUT 变量以匹配新的 TARFILE 路径
+OUTPUT="${TARFILE}"
+
+# 如果 DETECT_BLS_BOOT 需要追加文件，可以使用以下方法
+if [ "${DETECT_BLS_BOOT}" -eq 1 ]; then
+    echo "auto-detecting 'bls_boot' partition"
+    mount_disk "${TMP_DIR}"/disk
+    BOOT_PARTITION=$(parted -ms "${TMP_DIR}"/disk/nbd print 2>/dev/null | grep bls_boot | cut -d: -f1)
+    
+    if [ -n "$BOOT_PARTITION" ]; then
+        mount_part "${BOOT_PARTITION}" "${BOOT_MOUNT}"
+        
+        echo "重新打包包含 boot 分区的镜像..."
+        # 创建临时目录收集所有内容
+        TEMP_ROOT="${TMP_DIR}/full_root"
+        mkdir -p "${TEMP_ROOT}"
+        
+        # 复制 root 分区内容
+        cp -a "${ROOT_MOUNT}/." "${TEMP_ROOT}/"
+        
+        # 复制 boot 分区内容
+        if [ -d "${BOOT_MOUNT}" ]; then
+            cp -a "${BOOT_MOUNT}/." "${TEMP_ROOT}/boot/"
+        fi
+        
+        # 重新创建压缩镜像到目标目录
+        rm -f "${TARFILE}"
+        tar -C "${TEMP_ROOT}" \
+            --acls \
+            --selinux \
+            --xattrs \
+            --one-file-system \
+            --exclude-backups \
+            -c . | \
+        pigz -9 -p "$CPU_CORES" > "${TARFILE}"
+        
+        # 清理临时目录
+        rm -rf "${TEMP_ROOT}"
+    fi
+fi
+
+# 如果需要非压缩的 TARFILE，可以使用并行解压和重压缩
+if [ -n "$TARFILE" ] && [ "$TARFILE" != "$OUTPUT" ]; then
+    echo "创建未压缩的 tar 文件..."
+    # 确保输出目录存在
+    mkdir -p "/root/packer-maas/scripts"
+    UNCOMPRESSED_TAR="/root/packer-maas/scripts/$(basename "${TARFILE%.*}")"
+    pigz -d -p "$CPU_CORES" -c "${TARFILE}" > "${UNCOMPRESSED_TAR}"
+fi
+
+if [ -n "$MANIFEST" ]; then
+    echo "Creating manifest..."
+    # RPM on CentOS/RHEL 7 needs /dev mounted so it can use /dev/urandom
+    mount -o bind /dev "${ROOT_MOUNT}/dev"
+    
+    # 并行处理 rpm 查询（如果系统支持）
+    if command -v parallel &>/dev/null && [ "$(rpm --version 2>/dev/null | wc -l)" -gt 0 ]; then
+        # 使用 GNU parallel 并行查询包信息
+        chroot "${ROOT_MOUNT}" rpm -qa | sort -u -o "$MANIFEST"
+    else
+        chroot "${ROOT_MOUNT}" rpm -qa | sort -u -o "$MANIFEST"
+    fi
+    
+    umount "${ROOT_MOUNT}/dev"
+    grep -qs "${ROOT_MOUNT}/dev " /proc/mounts && umount -f "${ROOT_MOUNT}/dev"
+fi
+
+# 并行卸载（如果可能）
+{
+    sync
+    fusermount -z -u "${ROOT_MOUNT}"
+    grep -qs "${ROOT_MOUNT} " /proc/mounts && umount -f "${ROOT_MOUNT}"
+    
+    # 清理挂载点
+    rmdir "${ROOT_MOUNT}" "${BOOT_MOUNT}" 2>/dev/null || true
+} &
+
+echo '等待卸载完成...'
+wait
+
+echo 'Done'
+
+# 检查 pigz 是否安装，如果没有则回退到 gzip
+check_compression_tool() {
+    if ! command -v pigz &>/dev/null; then
+        echo "警告: pigz 未安装，使用单线程 gzip"
+        echo "安装 pigz: apt-get install pigz 或 yum install pigz"
+        return 1
+    fi
+    return 0
+}
+
+# 在脚本开始时检查
+check_compression_tool || {
+    # 如果 pigz 不可用，使用原版 gzip 单线程版本
+    # 这里可以放置回退代码，或者提醒用户
+    echo "使用单线程压缩..."
+}

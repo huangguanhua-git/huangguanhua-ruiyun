@@ -1,0 +1,31 @@
+#!/bin/bash -ex
+#
+# setup-bootloader - Install bootloader for legacy BIOS only
+#
+# Copyright (C) 2024 Canonical
+
+export DEBIAN_FRONTEND=noninteractive
+
+# Clean up remnants
+rm -f /var/cache/debconf/config.dat
+dpkg --configure -a
+apt-get update
+apt-get -y install linux-image-5.15.0-119-generic
+
+ARCH=$(dpkg --print-architecture)
+
+# Only install legacy BIOS bootloader for x86
+if [ ${ARCH} = "amd64" ]; then
+    apt-get -y install grub-pc
+    dpkg-reconfigure grub-pc
+    update-grub
+    
+    # Install to boot disk
+    BOOT_DISK=$(lsblk -npo PKNAME $(findmnt -n -o SOURCE /) | head -1)
+    grub-install --target=i386-pc ${BOOT_DISK}
+else
+    echo "Warning: Legacy BIOS boot is only supported on x86 architecture"
+    echo "ARM systems require UEFI boot"
+fi
+
+update-initramfs -uk all

@@ -1,0 +1,42 @@
+---
+- name: 传输tgz文件到maas主机并创建镜像
+  hosts: t01
+  gather_facts: no
+  become: yes
+  become_method: sudo 
+  become_user: root
+  
+  # 配置通过跳板机连接
+  vars:
+    ansible_ssh_common_args: '-o ProxyCommand="ssh -i /root/.ssh/id_rsa -W %h:%p -q root@10.10.249.214"'
+    #    ansible_ssh_common_args: '-o ProxyCommand="sshpass -p Sy@12345678 ssh -W %h:%p -q ubuntu@10.10.249.214"'
+    #    ansible_ssh_user: ubuntu
+    #    ansible_ssh_pass: Sy@12345678
+  
+  tasks:
+    #   - name: 创建目标目录（如果不存在）
+    #     ansible.builtin.file:
+    #       path: "{{ item }}"
+    #       state: directory
+    #       mode: '0755'
+    #     loop:
+    #       - /home/ubuntu/custom-ubuntu-img
+    #   - name: 传输tgz文件到maas主机
+    #     ansible.builtin.copy:
+    #        src: /root/packer-maas/scripts/custom-ubuntu.tar.gz
+    #        dest: /home/ubuntu/custom-ubuntu-img
+    #        mode: '0644'
+    #        force: yes
+    #        checksum: no
+   - name: 上传镜像到maas
+     shell: |
+       cd /home/ubuntu/custom-ubuntu-img
+       echo "$(dpkg --print-architecture)-{{ ci_job_id }}-$(date '+%Y%m%d-%H%M')" >> /home/ubuntu/custom-ubuntu-img/iso.txt
+       maas admin boot-resources create \
+         name="custom/$(dpkg --print-architecture)-{{ ci_job_id }}-$(date '+%Y%m%d-%H%M')" \
+         title="$(dpkg --print-architecture)-{{ ci_job_id }}-$(date '+%Y%m%d-%H%M')" \
+         architecture='amd64/generic' \
+         filetype='tgz' \
+         content@=custom-ubuntu.tar.gz
+   - name: 删除已上传镜像的tgz包
+     shell: rm -f /home/ubuntu/custom-ubuntu-img/custom-ubuntu.tar.gz

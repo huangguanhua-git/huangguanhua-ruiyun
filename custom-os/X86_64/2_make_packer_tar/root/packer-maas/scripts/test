@@ -1,0 +1,4 @@
+#!/bin/bash -e
+set -x
+#pigz -6 -c /root/packer-maas/ubuntu/custom-ubuntu.tar > /root/packer-maas/scripts/custom-ubuntu.tar.gz
+echo "done"

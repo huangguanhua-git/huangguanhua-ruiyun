@@ -1,0 +1,182 @@
+#!/bin/bash -e
+#
+# fuse-nbd - Create a tar.gz from a binded fuse device
+#
+# Author: Alexsander Silva de Souza <alexsander.souza@canonical.com>
+#
+# Copyright (C) 2023 Canonical
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+set -x
+
+PACKER_OUTPUT=output-${SOURCE:-qemu}/packer-${SOURCE:-qemu}
+IMG_FMT=${IMG_FMT:-qcow2}
+
+PACKER_OUTPUT=/root/packer-maas/ubuntu/output-flat/packer-flat
+
+if [ ! -f "${PACKER_OUTPUT}" ]; then
+    echo "ERROR: Not in the same path as template!" >&2
+    exit
+fi
+
+sync -f "${PACKER_OUTPUT}"
+
+TMP_DIR=$(mktemp -d /tmp/packer-maas-XXXX)
+cleanup() {
+    for dev in "${TMP_DIR}"/p*/ "${TMP_DIR}"/disk/ "${TMP_DIR}"/boot/; do
+        dev=${dev%*/}
+        if [ -d "${dev}" ]; then
+            fusermount -u -z "${dev}"
+            grep -qs "${dev} " /proc/mounts && umount -f "${dev}"
+        fi
+    done
+    rm -rf "${TMP_DIR}"
+}
+trap cleanup EXIT
+
+function mount_disk() {
+    DEV=$1
+    mkdir -p "${DEV}"
+    nbdfuse "${DEV}" \
+        --command nbdkit -s nbd \
+        socket="${TMP_DIR}"/qemu-img.sock &
+    retries=0
+    until [ -f "${DEV}/nbd" ]; do
+        sleep 1
+        if ((++retries > 10)); then
+            return 1
+        fi
+    done
+}
+
+function mount_part1() {
+    PART=$1
+    #MOUNTPOINT=$2
+    MOUNTPOINT=/mnt/tmp-root
+    FUSEDRV=${3:-fuse2fs}
+    DEV=${TMP_DIR}/p${PART}
+    mkdir -p "${MOUNTPOINT}"
+    mkdir -p "${DEV}"
+    nbdfuse "${DEV}" \
+        --command nbdkit -s nbd \
+        socket="${TMP_DIR}"/qemu-img.sock \
+        --filter=partition partition="${PART}" &
+    retries=0
+    until [ -f "${DEV}/nbd" ]; do
+        sleep 1
+        if ((++retries > 10)); then
+            return 1
+        fi
+    done
+    case "${FUSEDRV}" in
+    "fusefat") fusefat "${DEV}"/nbd "${MOUNTPOINT}" -o rw+ -s ;;
+    "fuse2fs") fuse2fs "${DEV}"/nbd "${MOUNTPOINT}" -o fakeroot ;;
+    *) echo "Unsupported Fuse driver" && exit 1 ;;
+    esac
+}
+
+function mount_part() {
+    PART=$1
+    MOUNTPOINT=/mnt/tmp-root
+    DEV=${TMP_DIR}/p${PART}
+    mkdir -p "${MOUNTPOINT}"
+
+    echo "[*] 挂载镜像 ${PACKER_OUTPUT} 到 /dev/nbd0"
+    sudo modprobe nbd max_part=16
+    sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null
+    sudo qemu-nbd --format=raw --connect=/dev/nbd0 "${PACKER_OUTPUT}"
+    #echo "[*] 扫描 LVM 信息..."
+    #sudo pvscan
+    #sudo vgscan
+    #sudo vgchange -ay
+
+    #LV_PATH=$(sudo lvscan | grep ACTIVE | awk -F"'" '{print $2}' | head -n1)
+
+    #if [ -z "${LV_PATH}" ]; then
+    #    echo "[!] 没有找到活动的逻辑卷。"
+    #fi
+
+    #echo "[*] 挂载逻辑卷 ${LV_PATH} 到 ${MOUNTPOINT}"
+    sudo mkdir -p "${MOUNTPOINT}"
+    sudo mount /dev/nbd0p2 "${MOUNTPOINT}"
+    #sudo mount /dev/nbd0 "${MOUNTPOINT}"
+}
+
+
+ROOT_PARTITION=${ROOT_PARTITION:-1}
+ROOT_MOUNT=${TMP_DIR}/root
+DETECT_BLS_BOOT=${DETECT_BLS_BOOT:-0}
+BOOT_MOUNT=${TMP_DIR}/boot
+
+ROOT_PARTITION=3
+ROOT_MOUNT=/mnt/tmp-root
+
+echo "${ROOT_PARTITION}" "${ROOT_MOUNT}"
+
+echo 'Mounting root partition...'
+mount_part "${ROOT_PARTITION}" "${ROOT_MOUNT}"
+sleep 30
+if [ -f "$ROOT_MOUNT/etc/machine-id" ]; then
+    echo 'reseting machine-id...'
+    : >| "$ROOT_MOUNT/etc/machine-id"
+fi
+
+if [ -f "$ROOT_MOUNT/var/lib/cloud/instance" ]; then
+    echo 'cleaning cloud-init state...'
+    rm -f "$ROOT_MOUNT/var/log/cloud-init*.log" \
+        "$ROOT_MOUNT/var/lib/cloud/instance"
+    rm -rf "$ROOT_MOUNT/var/lib/cloud/instances"
+fi
+
+if [ -d curtin ] || [ -d "$CURTIN_HOOKS" ]; then
+    echo 'Adding Curtin hooks...'
+    cp -r "${CURTIN_HOOKS:-curtin}" "${ROOT_MOUNT}"
+fi
+
+echo "Creating MAAS image ${OUTPUT}..."
+
+#TARFILE=${OUTPUT%*.gz}
+TARFILE=custom.tar
+tar -Scpf "${TARFILE}" --acls --selinux --xattrs \
+    --one-file-system \
+    --exclude-backups \
+    -C "$ROOT_MOUNT" .
+
+if [ "${DETECT_BLS_BOOT}" -eq 1 ]; then
+    echo "auto-detecting 'bls_boot' partition"
+    mount_disk "${TMP_DIR}"/disk
+    BOOT_PARTITION=$(parted -ms "${TMP_DIR}"/disk/nbd print | grep bls_boot | cut -d: -f1)
+    if [ -n "$BOOT_PARTITION" ]; then
+        mount_part "${BOOT_PARTITION}" "${BOOT_MOUNT}"
+        tar -Supf "${TARFILE}" --acls --selinux --xattrs -C "$TMP_DIR" boot/
+    fi
+fi
+
+pigz -6 -c /root/packer-maas/ubuntu/custom.tar > /root/packer-maas/scripts/custom-ubuntu.tar.gz
+#gzip --best --force "${TARFILE}"
+
+if [ -n "$MANIFEST" ]; then
+    echo "Creating manifest..."
+    # RPM on CentOS/RHEL 7 needs /dev mounted so it can use /dev/urandom
+    mount -o bind /dev "${ROOT_MOUNT}/dev"
+    chroot "${ROOT_MOUNT}" rpm -qa | sort -u -o "$MANIFEST"
+    umount "${ROOT_MOUNT}/dev"
+    grep -qs "${ROOT_MOUNT}/dev " /proc/mounts && umount -f "${ROOT_MOUNT}/dev"
+fi
+
+sync
+fusermount -z -u "${ROOT_MOUNT}"
+grep -qs "${ROOT_MOUNT} " /proc/mounts && umount -f "${ROOT_MOUNT}"
+echo 'Done'
+

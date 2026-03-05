@@ -1,0 +1,57 @@
+---
+- name: 部署自定义镜像
+  hosts: t01
+  gather_facts: no
+  become: yes
+  become_method: sudo 
+  become_user: root
+  
+  # 配置通过跳板机连接
+  vars:
+    ansible_ssh_common_args: '-o ProxyCommand="ssh -i /root/.ssh/id_rsa -W %h:%p -q root@10.10.249.214"'
+    #    ansible_ssh_common_args: '-o ProxyCommand="sshpass -p Sy@12345678 ssh -W %h:%p -q ubuntu@10.10.249.214"'
+    #    ansible_ssh_user: ubuntu
+    #    ansible_ssh_pass: Sy@12345678
+  
+  tasks:
+   - name: 创建目标目录（如果不存在）
+     ansible.builtin.file:
+       path: "{{ item }}"
+       state: directory
+       mode: '0755'
+     loop:
+       - /home/ubuntu/
+   
+   - name: 传输user-data文件到maas主机
+     ansible.builtin.copy:
+        src: /mnt/custom-os/ARM_64/5_deploy_os/user-data.yaml
+        dest: /home/ubuntu/
+        mode: '0644'
+        force: yes
+        checksum: yes  
+   
+   - name: 获取部署镜像名称和部署时间
+     shell: |
+       myiso=`tail -n1 /home/ubuntu/custom-ubuntu-img/iso.txt`;echo $myiso 
+       readyname=$(maas admin machines read | jq -r '.[] | select(.status_name == "Ready") | .system_id' | tail -n1)
+       name=$(maas admin machines read | jq -r '.[] | select(.status_name == "Ready") | .hostname'| tail -n1)
+       echo "准备部署的机器hostname--sysid: $name--$readyname"
+       echo "部署的镜像是：$myiso"
+       echo "部署的时间是：$(date '+%Y-%m-%d %H:%M')"
+     register: iso_result
+   
+   - name: 调试输出部署镜像和时间
+     debug:
+       var: iso_result.stdout_lines
+   
+   - name: ready机器部署中
+     shell: |
+       readyname=$(maas admin machines read | jq -r '.[] | select(.status_name == "Ready") | .system_id' | tail -n1)
+       echo "准备部署的机器: $readyname"
+       user_data_base64=$(base64 -w0 /home/ubuntu/user-data.yaml)
+       maas admin machine deploy $readyname distro_series=custom/{{ iso_result.stdout_lines[0] }} user_data="$user_data_base64"
+     register: deploy_result
+       
+       #   - name: 调试输出deploy
+       #     debug:
+       #       var: deploy_result.stdout_lines

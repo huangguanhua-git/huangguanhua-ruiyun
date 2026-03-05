@@ -1,0 +1,22 @@
+#cloud-config
+
+chpasswd:
+  list: |
+    ubuntu:x4zAPiU9E8
+  expire: False
+
+disable_root: false
+ssh_pwauth: true
+
+runcmd:
+  - cp /etc/apt/sources.list /etc/apt/sources.list.bak
+  - sudo sed -i "/update_etc_hosts/c \ - ['update_etc_hosts', 'once-per-instance']" /etc/cloud/cloud.cfg
+  - sed -i 's/^#Port 2222/Port 22/' /etc/ssh/sshd_config
+  - sed -i 's/^Port 2222/Port 22/' /etc/ssh/sshd_config
+  - apt update
+
+users:
+  - default
+  - name: root
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDJASMqS02OSAz2RJfOqO8PnHZEKuUf9BMbyaXYeSdPoAj31BegSlYT+VgdibqA8OjlScl23LEGM5Bx1Sv9+bfxy04WLF7BOu1N/hp43A7sg9ykul9yBGhFBE0wZ4JQdKoazu7dI+Njf4MxVZR1RVVeSpIC8Z9SUPiwmHRFFTSrmK0cPGewOcIIWNgEGubXiPaL4zidHO68FTwnart2L8I8TUuwLLsBBUi5adA6gE90BVnd+1xF03DlM5IlhE4olWT1f6bo1utCf+VCyfDd8Io8DvOGbm6zD98jwzk5M+oS20UALn4kucjKeuMvu9c1Azp/a/Wreh1DBqOKcH8fB2OMQzFFI74GCd58rYld2Ml/o9go0g0MxLRrxNAOLol03ehLRWLi7hn55l8ssoSFg1fczVfnbXYs4C7TRLXA/nOny8GKWeg5VOajpAJF2/DQyLYdmlSRZ6IKI/74M2Acoc4Kk5dM9LBwStaGkK3m8GXowAtKK0awJ4KMPPqlm+5W68s= root@sj-x86-maas

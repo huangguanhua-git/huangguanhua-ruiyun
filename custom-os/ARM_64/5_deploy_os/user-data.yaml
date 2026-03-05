@@ -1,0 +1,9 @@
+#cloud-config
+package_update: false
+password: Sy@12345678
+chpasswd:
+  expire: false
+ssh_pwauth: true
+runcmd:
+  - sed -i "/update_etc_hosts/c \ - ['update_etc_hosts', 'once-per-instance']" /etc/cloud/cloud.cfg
+

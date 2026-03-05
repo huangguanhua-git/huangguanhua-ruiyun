@@ -1,0 +1,8 @@
+[t01]
+10.1.5.4 ansible_ssh_common_args='-o ProxyCommand="ssh -i /root/.ssh/id_rsa -W %h:%p -q root@10.10.249.214" -o ForwardAgent=yes -o StrictHostKeyChecking=no'
+[t01:vars]
+ansible_ssh_private_key_file=/root/.ssh/id_rsa
+ansible_user=root
+ansible_python_interpreter=/usr/bin/python3
+
+

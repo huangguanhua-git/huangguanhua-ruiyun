@@ -1,0 +1,97 @@
+stages:
+  - 1_make_iso
+  - 2_make_packer_tar
+  - 3_accelerated_compression
+  - 4_upload_tar
+  - 5_deploy_os
+
+make_iso:
+  stage: 1_make_iso
+  tags:
+    - custom-runner-1
+  script:
+    - "echo '清理之前的构建进程...'"
+    - "sudo pkill -f mksquashfs || true"
+    - "sudo pkill -f xorriso || true"
+    - "sudo pkill -f 'make custom-ubuntu.tar.gz' || true"
+    - "sudo pkill -f packer || true"
+    - "sudo snap remove lxd || true"
+    - "echo '进程清理完成，开始新的构建...'"
+    - "sudo bash -c 'echo > /mnt/custom-os/X86_64/make.log'"
+    - "sudo bash /mnt/custom-os/X86_64/1_make_iso/all.sh"
+  only:
+    - main
+  #when: manual
+
+make_packer_tar:
+  stage: 2_make_packer_tar
+  tags:
+    - custom-runner-1
+  script:
+    - "echo '检查并清理之前的进程...'"
+    - "sudo pkill -f mksquashfs || true"
+    - "sudo pkill -f xorriso || true"
+    - "sudo pkill -f 'make custom-ubuntu.tar.gz' || true"
+    - "sudo pkill -f packer || true"
+    - "sudo pkill -f qemu* || true"
+    - "echo '开始生成 packer tar...'"
+    - "sudo cp -rvp /mnt/custom-os/X86_64/2_make_packer_tar/root/ /"     
+    - "sudo bash /mnt/custom-os/X86_64/2_make_packer_tar/make_hcl.sh"
+    - "sudo rm -rf /root/packer-maas/ubuntu/output-flat/"
+    - "sudo bash -c 'cd /root/packer-maas/ubuntu/;nohup make custom-ubuntu.tar.gz >> /mnt/custom-os/X86_64/make.log 2>&1 &'"
+    - "sleep 2"
+    - "MAKE_PID=$(pgrep -f 'make custom-ubuntu.tar.gz')"
+    - "echo \"Make进程PID: $MAKE_PID\""
+    - "echo $MAKE_PID | sudo tee /mnt/custom-os/X86_64/make.pid > /dev/null"
+    - "sudo cp /mnt/custom-os/X86_64/make.pid $CI_PROJECT_DIR/"
+    - "echo \"Make进程已启动，PID: $PID\""
+  only:
+    - main
+  #when: manual
+  artifacts:
+    paths:
+      - make.pid
+    expire_in: 1 hour
+
+accelerated_compression:
+  stage: 3_accelerated_compression
+  tags:
+    - custom-runner-1
+  script:
+    - "sudo bash /mnt/custom-os/X86_64/3_accelerated_compression/wait_for_compression.sh > /mnt/custom-os/X86_64/time.log"
+    - "sudo bash -c 'cd /root/packer-maas/scripts/;bash /root/packer-maas/scripts/test'"
+    - "echo '加速压缩脚本执行完成'"
+  only:
+    - main
+  #when: manual
+
+upload_tar:
+  stage: 4_upload_tar
+  tags:
+    - custom-runner-1
+  script:
+    - "echo '开始清理进程...'"
+    - "sudo pkill -f mksquashfs || true"
+    - "sudo pkill -f xorriso || true"
+    - "ps -ef|grep all.sh|grep -v grep|awk '{print$2}'|xargs kill -9 || true"
+    - "if [ -f /mnt/custom-os/X86_64/make.pid ]; then sudo kill -9 $(sudo cat /mnt/custom-os/X86_64/make.pid) 2>/dev/null || true; echo '已尝试结束make进程'; fi"
+    - "sudo pkill -f 'make custom-ubuntu.tar.gz' 2>/dev/null || true; echo '已尝试结束make进程(备用方法)'"
+    - "sudo pkill -f packer 2>/dev/null || true; echo '已尝试结束packer进程'"
+    - "sudo pkill -f 'gzip --best' 2>/dev/null || true; echo '已尝试结束gzip进程'"
+    - "sudo rm -f /root/packer-maas/scripts/custom.tar"
+    - 'sudo scp -o ProxyCommand="ssh -W %h:%p 10.10.249.214" /root/packer-maas/scripts/custom-ubuntu.tar.gz 10.1.5.4:/home/ubuntu/custom-ubuntu-img/'
+    - 'sudo ansible-playbook /mnt/custom-os/X86_64/4_upload_tar/cp.yaml -i /mnt/custom-os/X86_64/4_upload_tar/maasip -e "ci_job_id=$((CI_JOB_ID + 1))"'
+    - "echo '上传完成，所有进程清理完毕'"
+  only:
+    - main
+  #when: manual
+
+deploy_os:
+  stage: 5_deploy_os
+  tags:
+    - custom-runner-1
+  script:
+    - "sudo ansible-playbook /mnt/custom-os/X86_64/5_deploy_os/deploy.yaml -i /mnt/custom-os/X86_64/5_deploy_os/maasip"
+  only:
+    - main
+  #when: manual
